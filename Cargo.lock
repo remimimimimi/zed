@@ -8280,6 +8280,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inline_preiew"
+version = "0.1.0"
+dependencies = [
+ "futures 0.3.31",
+ "smol",
+ "tempfile",
+]
+
+[[package]]
 name = "inotify"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,17 @@
+[package]
+name = "inline_preiew"
+version = "0.1.0"
+publish.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+
+[lib]
+path = "src/inline_preview.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+tempfile.workspace = true
+futures.workspace = true
+smol.workspace = true

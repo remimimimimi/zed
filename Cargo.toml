@@ -226,7 +226,8 @@ members = [
     #
 
     "tooling/perf",
-    "tooling/xtask",
+    "tooling/xtask", 
+    "crates/inline_preiew",
 ]
 default-members = ["crates/zed"]
 
