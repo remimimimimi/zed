@@ -8286,6 +8286,7 @@ dependencies = [
  "futures 0.3.31",
  "smol",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]

@@ -1314,6 +1314,7 @@ pub struct Grammar {
     pub(crate) debug_variables_config: Option<DebugVariablesConfig>,
     pub(crate) imports_config: Option<ImportsConfig>,
     pub(crate) highlight_map: Mutex<HighlightMap>,
+    pub(crate) math_preview_config: Option<MathPreviewConfig>,
 }
 
 pub struct HighlightsConfig {
@@ -1477,6 +1478,50 @@ pub struct ImportsConfig {
     pub alias_ix: Option<u32>,
 }
 
+#[derive(Debug)]
+pub enum MathPreviewKind {
+    Inline,
+    Block,
+}
+
+#[derive(Debug)]
+pub enum MathPreviewBackend {
+    Latex,
+    Typst,
+}
+
+#[derive(Debug)]
+struct MathPreviewCapture {
+    pub kind: MathPreviewKind,
+    pub backend: MathPreviewBackend,
+}
+
+impl MathPreviewCapture {
+    fn from_capture_name(name: &str) -> Option<Self> {
+        let name = name.strip_prefix("math.")?;
+        let mut parts = name.split('.');
+        let kind = match parts.next()? {
+            "inline" => MathPreviewKind::Inline,
+            "block" => MathPreviewKind::Block,
+            _ => return None,
+        };
+        let backend = match parts.next()? {
+            "latex" => MathPreviewBackend::Latex,
+            "typst" => MathPreviewBackend::Typst,
+            _ => return None,
+        };
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(MathPreviewCapture { kind, backend })
+    }
+}
+
+struct MathPreviewConfig {
+    query: Query,
+    math_preview_captures_by_ix: Vec<(u32, MathPreviewCapture)>,
+}
+
 impl Language {
     pub fn new(config: LanguageConfig, ts_language: Option<tree_sitter::Language>) -> Self {
         Self::new_with_id(LanguageId::new(), config, ts_language)
@@ -1512,6 +1557,7 @@ impl Language {
                     imports_config: None,
                     ts_language,
                     highlight_map: Default::default(),
+                    math_preview_config: None,
                 })
             }),
             context_provider: None,
@@ -1595,6 +1641,11 @@ impl Language {
             self = self
                 .with_imports_query(query.as_ref())
                 .context("Error loading imports query")?;
+        }
+        if let Some(query) = queries.math_previews {
+            self = self
+                .with_math_previews_query(query.as_ref())
+                .context("Error loading math previews query")?;
         }
         Ok(self)
     }
@@ -2045,6 +2096,28 @@ impl Language {
                 redaction_capture_ix,
             });
         }
+        Ok(self)
+    }
+
+    pub fn with_math_previews_query(mut self, source: &str) -> anyhow::Result<Self> {
+        let query = Query::new(&self.expect_grammar()?.ts_language, source)?;
+        let mut math_preview_captures_by_ix = Vec::new();
+        for (ix, name) in query.capture_names().iter().enumerate() {
+            if let Some(capture) = MathPreviewCapture::from_capture_name(name) {
+                math_preview_captures_by_ix.push((ix as u32, capture));
+            } else if !name.starts_with('_') {
+                log::warn!(
+                    "unrecognized capture name '{}' in {} math previews TreeSitter query",
+                    name,
+                    self.config.name,
+                );
+            }
+        }
+
+        self.grammar_mut()?.math_preview_config = Some(MathPreviewConfig {
+            query,
+            math_preview_captures_by_ix,
+        });
         Ok(self)
     }
 
@@ -2806,6 +2879,7 @@ pub fn rust_lang() -> Arc<Language> {
         imports: Some(Cow::from(include_str!(
             "../../languages/src/rust/imports.scm"
         ))),
+        math_previews: None,
     })
     .expect("Could not parse queries");
     Arc::new(language)
@@ -2843,6 +2917,9 @@ pub fn markdown_lang() -> Arc<Language> {
         outline: Some(Cow::from(include_str!(
             "../../languages/src/markdown/outline.scm"
         ))),
+        math_previews: Some(Cow::from(include_str!(
+            "../../languages/src/markdown/math_previews.scm"
+        ))),
         ..LanguageQueries::default()
     })
     .expect("Could not parse markdown queries");
@@ -2854,6 +2931,7 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
     use pretty_assertions::assert_matches;
+    use tree_sitter::StreamingIterator;
 
     #[gpui::test(iterations = 10)]
     async fn test_language_loading(cx: &mut TestAppContext) {
@@ -3085,5 +3163,81 @@ mod tests {
             assert_eq!(config.prefix.as_ref(), "");
             assert_eq!(config.tab_size, 0);
         }
+    }
+
+    #[test]
+    fn test_math_preview_map_for_markdown_inline() {
+        let language = Language::new(
+            LanguageConfig {
+                name: "Markdown-Inline".into(),
+                hidden: true,
+                ..LanguageConfig::default()
+            },
+            Some(tree_sitter_md::INLINE_LANGUAGE.into()),
+        )
+        .with_math_previews_query(include_str!(
+            "../../languages/src/markdown-inline/math_previews.scm"
+        ))
+        .expect("Could not parse markdown-inline previews query");
+
+        let grammar = language.grammar.as_ref().expect("missing grammar");
+        let map = grammar
+            .math_preview_config
+            .as_ref()
+            .expect("missing math preview map");
+
+        let text = "Inline $x^2$ and $$y$$.";
+        let mut parser = Parser::new();
+        parser
+            .set_language(&grammar.ts_language)
+            .expect("failed to set markdown-inline language");
+        let tree = parser
+            .parse(text, None)
+            .expect("failed to parse markdown inline text");
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&map.query, tree.root_node(), text.as_bytes());
+        let mut captures = Vec::new();
+        while let Some(mat) = matches.next() {
+            for capture in mat.captures {
+                if let Some((_, preview_capture)) = map
+                    .math_preview_captures_by_ix
+                    .iter()
+                    .find(|(ix, _)| *ix == capture.index)
+                {
+                    let name = map.query.capture_names()[capture.index as usize].to_string();
+                    let kind = match preview_capture.kind {
+                        MathPreviewKind::Inline => "inline",
+                        MathPreviewKind::Block => "block",
+                    };
+                    let backend = match preview_capture.backend {
+                        MathPreviewBackend::Latex => "latex",
+                        MathPreviewBackend::Typst => "typst",
+                    };
+                    let range = capture.node.byte_range();
+                    let snippet = text[range].to_string();
+                    captures.push((name, kind, backend, snippet));
+                }
+            }
+        }
+
+        captures.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            captures,
+            vec![
+                (
+                    "math.block.latex".to_string(),
+                    "block",
+                    "latex",
+                    "$$y$$".to_string()
+                ),
+                (
+                    "math.inline.latex".to_string(),
+                    "inline",
+                    "latex",
+                    "$x^2$".to_string()
+                ),
+            ]
+        );
     }
 }
