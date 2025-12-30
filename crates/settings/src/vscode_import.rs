@@ -494,6 +494,8 @@ impl VsCodeSettings {
                         .collect()
                 }),
             word_diff_enabled: None,
+            math_previews_inline: None,
+            math_previews_popover: None,
         }
     }
 

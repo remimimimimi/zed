@@ -5417,6 +5417,7 @@ dependencies = [
  "gpui",
  "http_client",
  "indoc",
+ "inline_preiew",
  "itertools 0.14.0",
  "language",
  "languages",

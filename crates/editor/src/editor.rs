@@ -30,6 +30,7 @@ mod jsx_tag_auto_close;
 mod linked_editing_ranges;
 mod lsp_colors;
 mod lsp_ext;
+mod math_previews;
 mod mouse_context_menu;
 pub mod movement;
 mod persistence;
@@ -65,6 +66,7 @@ pub use inlays::Inlay;
 pub use items::MAX_TAB_TITLE_LEN;
 pub use lsp::CompletionContext;
 pub use lsp_ext::lsp_tasks;
+use math_previews::MathPreviews;
 pub use multi_buffer::{
     Anchor, AnchorRangeExt, BufferOffset, ExcerptId, ExcerptRange, MBTextSummary, MultiBuffer,
     MultiBufferOffset, MultiBufferOffsetUtf16, MultiBufferSnapshot, PathKey, RowInfo, ToOffset,
@@ -1094,6 +1096,7 @@ pub struct Editor {
     completion_tasks: Vec<(CompletionId, Task<()>)>,
     inline_blame_popover: Option<InlineBlamePopover>,
     inline_blame_popover_show_task: Option<Task<()>>,
+    math_previews: MathPreviews,
     signature_help_state: SignatureHelpState,
     auto_signature_help: Option<bool>,
     find_all_references_task_sources: Vec<Anchor>,
@@ -2257,6 +2260,7 @@ impl Editor {
             completion_tasks: Vec::new(),
             inline_blame_popover: None,
             inline_blame_popover_show_task: None,
+            math_previews: MathPreviews::new(),
             signature_help_state: SignatureHelpState::default(),
             auto_signature_help: None,
             find_all_references_task_sources: Vec::new(),
@@ -2458,6 +2462,7 @@ impl Editor {
                                 })
                                 .ok();
                         });
+                        editor.refresh_math_previews(true, window, cx);
                     }
                 }
                 EditorEvent::Edited { .. } => {
@@ -2486,6 +2491,13 @@ impl Editor {
                             .change_list
                             .push_to_change_list(pop_state, new_positions);
                     }
+                    editor.refresh_math_previews(true, window, cx);
+                }
+                EditorEvent::Reparsed(_) => {
+                    editor.refresh_math_previews(false, window, cx);
+                }
+                EditorEvent::SelectionsChanged { .. } => {
+                    editor.update_math_preview_selection(window, cx);
                 }
                 _ => (),
             },
@@ -22239,6 +22251,8 @@ impl Editor {
             if language_settings_changed || accents_changed {
                 self.colorize_brackets(true, cx);
             }
+
+            self.refresh_math_previews(false, window, cx);
 
             if let Some(inlay_splice) = self.colors.as_mut().and_then(|colors| {
                 colors.render_mode_updated(EditorSettings::get_global(cx).lsp_document_colors)

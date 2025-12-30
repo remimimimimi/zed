@@ -5755,6 +5755,22 @@ impl MultiBufferSnapshot {
         )
     }
 
+    pub fn math_fragments<T: ToOffset>(
+        &self,
+        range: Range<T>,
+    ) -> impl Iterator<Item = (Range<MultiBufferOffset>, language::MathFragment, &BufferSnapshot)> + '_
+    {
+        let range = range.start.to_offset(self)..range.end.to_offset(self);
+        self.lift_buffer_metadata(range, move |buffer, range| {
+            Some(
+                buffer
+                    .math_fragments(range)
+                    .map(|fragment| (fragment.range.clone(), fragment)),
+            )
+        })
+        .map(|(range, fragment, excerpt)| (range, fragment, &excerpt.buffer))
+    }
+
     pub fn redacted_ranges<'a, T: ToOffset>(
         &'a self,
         range: Range<T>,

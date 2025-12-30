@@ -164,6 +164,10 @@ pub struct LanguageSettings {
     ///
     /// Default: `true`
     pub word_diff_enabled: bool,
+    /// Whether to render inline math previews in the editor.
+    pub math_previews_inline: bool,
+    /// Whether to show a math preview popover when the cursor is inside a math fragment.
+    pub math_previews_popover: bool,
     /// Whether to use tree-sitter bracket queries to detect and colorize the brackets in the editor.
     pub colorize_brackets: bool,
 }
@@ -611,6 +615,8 @@ impl settings::Settings for AllLanguageSettings {
                 },
                 debuggers: settings.debuggers.unwrap(),
                 word_diff_enabled: settings.word_diff_enabled.unwrap(),
+                math_previews_inline: settings.math_previews_inline.unwrap(),
+                math_previews_popover: settings.math_previews_popover.unwrap(),
             }
         }
 

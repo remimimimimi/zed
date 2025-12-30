@@ -1241,6 +1241,14 @@
   //
   // Default: true
   "word_diff_enabled": true,
+  // Whether to render inline math previews in the editor.
+  //
+  // Default: true
+  "math_previews_inline": true,
+  // Whether to show a math preview popover when the cursor is inside a math fragment.
+  //
+  // Default: true
+  "math_previews_popover": true,
   // Control what info is collected by Zed.
   "telemetry": {
     // Send debug info like crash reports.

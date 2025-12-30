@@ -441,6 +441,14 @@ pub struct LanguageSettingsContent {
     ///
     /// Default: true
     pub word_diff_enabled: Option<bool>,
+    /// Whether to render inline math previews in the editor.
+    ///
+    /// Default: true
+    pub math_previews_inline: Option<bool>,
+    /// Whether to show a math preview popover when the cursor is inside a math fragment.
+    ///
+    /// Default: true
+    pub math_previews_popover: Option<bool>,
     /// Whether to use tree-sitter bracket queries to detect and colorize the brackets in the editor.
     ///
     /// Default: false

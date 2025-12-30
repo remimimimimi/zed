@@ -28,6 +28,7 @@ use crate::{
     },
     inlay_hint_settings,
     items::BufferSearchHighlights,
+    math_previews::MathPreviewPopover,
     mouse_context_menu::{self, MenuPosition},
     scroll::{
         ActiveScrollbarState, Autoscroll, ScrollOffset, ScrollPixelOffset, ScrollbarThumbState,
@@ -48,10 +49,11 @@ use gpui::{
     Pixels, PressureStage, ScrollDelta, ScrollHandle, ScrollWheelEvent, ShapedLine, SharedString,
     Size, StatefulInteractiveElement, Style, Styled, TextAlign, TextRun, TextStyleRefinement,
     WeakEntity, Window, anchored, deferred, div, fill, linear_color_stop, linear_gradient, outline,
-    point, px, quad, relative, size, solid_background, transparent_black,
+    point, px, quad, relative, size, solid_background, svg, transparent_black,
 };
 use itertools::Itertools;
 use language::{IndentGuideSettings, language_settings::ShowWhitespaceSetting};
+use crate::math_previews::scale_svg_to_height;
 use markdown::Markdown;
 use multi_buffer::{
     Anchor, ExcerptId, ExcerptInfo, ExpandExcerptDirection, ExpandInfo, MultiBufferPoint,
@@ -2629,6 +2631,62 @@ impl EditorElement {
             buffer_id,
             entry,
         })
+    }
+
+    fn layout_math_preview_popover(
+        &self,
+        popover: MathPreviewPopover,
+        display_row: DisplayRow,
+        line_layout: &LineWithInvisibles,
+        crease_trailer: Option<&CreaseTrailerLayout>,
+        em_width: Pixels,
+        content_origin: gpui::Point<Pixels>,
+        scroll_position: gpui::Point<ScrollOffset>,
+        scroll_pixel_position: gpui::Point<ScrollPixelOffset>,
+        line_height: Pixels,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        let padding = ProjectSettings::get_global(cx).git.inline_blame.padding as f32 * em_width;
+        let display_size = scale_svg_to_height(popover.size, line_height);
+
+        let start_y =
+            content_origin.y + line_height * ((display_row.as_f64() - scroll_position.y) as f32);
+
+        let start_x = {
+            let line_end = if let Some(crease_trailer) = crease_trailer {
+                crease_trailer.bounds.right()
+            } else {
+                Pixels::from(
+                    ScrollPixelOffset::from(content_origin.x + line_layout.width)
+                        - scroll_pixel_position.x,
+                )
+            };
+
+            let padded_line_end = line_end + padding;
+            let min_column_in_pixels = column_pixels(
+                &self.style,
+                ProjectSettings::get_global(cx).git.inline_blame.min_column as usize,
+                window,
+            );
+            let min_start = Pixels::from(
+                ScrollPixelOffset::from(content_origin.x + min_column_in_pixels)
+                    - scroll_pixel_position.x,
+            );
+
+            cmp::max(padded_line_end, min_start)
+        };
+
+        let mut element = svg()
+            .external_path(popover.svg_path)
+            .w(display_size.width)
+            .h(display_size.height)
+            .text_color(cx.theme().colors().editor_foreground)
+            .into_any();
+
+        element.prepaint_as_root(point(start_x, start_y), AvailableSpace::min_size(), window, cx);
+
+        Some(element)
     }
 
     fn layout_blame_popover(
@@ -6547,6 +6605,7 @@ impl EditorElement {
                 self.paint_cursors(layout, window, cx);
                 self.paint_inline_diagnostics(layout, window, cx);
                 self.paint_inline_blame(layout, window, cx);
+                self.paint_math_preview_popover(layout, window, cx);
                 self.paint_inline_code_actions(layout, window, cx);
                 self.paint_diff_hunk_controls(layout, window, cx);
                 window.with_element_namespace("crease_trailers", |window| {
@@ -7328,6 +7387,19 @@ impl EditorElement {
         if let Some(mut blame_layout) = layout.inline_blame_layout.take() {
             window.paint_layer(layout.position_map.text_hitbox.bounds, |window| {
                 blame_layout.element.paint(window, cx);
+            })
+        }
+    }
+
+    fn paint_math_preview_popover(
+        &mut self,
+        layout: &mut EditorLayout,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if let Some(math_preview_popover) = layout.math_preview_popover.as_mut() {
+            window.paint_layer(layout.position_map.text_hitbox.bounds, |window| {
+                math_preview_popover.paint(window, cx);
             })
         }
     }
@@ -9922,6 +9994,39 @@ impl Element for EditorElement {
                         }
                     }
 
+                    let math_preview_popover = self
+                        .editor
+                        .read(cx)
+                        .math_preview_popover()
+                        .and_then(|popover| {
+                            let display_point =
+                                popover.anchor.to_display_point(&snapshot.display_snapshot);
+                            let display_row = display_point.row();
+                            if !(start_row..end_row).contains(&display_row)
+                                || row_block_types.contains_key(&display_row)
+                            {
+                                return None;
+                            }
+
+                            let line_ix = display_row.minus(start_row) as usize;
+                            let line_layout = line_layouts.get(line_ix)?;
+                            let crease_trailer =
+                                crease_trailers.get(line_ix).and_then(|trailer| trailer.as_ref());
+                            self.layout_math_preview_popover(
+                                popover,
+                                display_row,
+                                line_layout,
+                                crease_trailer,
+                                em_width,
+                                content_origin,
+                                scroll_position,
+                                scroll_pixel_position,
+                                line_height,
+                                window,
+                                cx,
+                            )
+                        });
+
                     let blamed_display_rows = self.layout_blame_entries(
                         &row_infos,
                         em_width,
@@ -10257,6 +10362,7 @@ impl Element for EditorElement {
                         blamed_display_rows,
                         inline_diagnostics,
                         inline_blame_layout,
+                        math_preview_popover,
                         inline_code_actions,
                         blocks,
                         cursors,
@@ -10435,6 +10541,7 @@ pub struct EditorLayout {
     blamed_display_rows: Option<Vec<AnyElement>>,
     inline_diagnostics: HashMap<DisplayRow, AnyElement>,
     inline_blame_layout: Option<InlineBlameLayout>,
+    math_preview_popover: Option<AnyElement>,
     inline_code_actions: Option<AnyElement>,
     blocks: Vec<BlockLayout>,
     highlighted_ranges: Vec<(Range<DisplayPoint>, Hsla)>,

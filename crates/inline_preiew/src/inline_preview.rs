@@ -71,8 +71,9 @@ impl CachedPaths {
 impl RenderConfig {
     pub fn new() -> Self {
         Self {
-            preamble_latex: "\\documentclass{article}\n\\pagestyle{empty}\n\\begin{document}".into(),
-            preamble_typst: "".into(),
+            // Use standalone with zero border to eliminate padding around rendered math.
+            preamble_latex: "\\documentclass[preview,border=0pt]{standalone}\n\\usepackage{newtxtext}\n\\usepackage{newtxmath}\n\\usepackage{amsmath}\n\\begin{document}".into(),
+            preamble_typst: "#set page(width: auto, height: auto, margin: 0pt)\n".into(),
             postamble_latex: "\\end{document}".into(),
             postamble_typst: "".into(),
             latex_cmd: "latex".into(),
@@ -137,6 +138,7 @@ impl RenderContext {
                     RenderCommand {
                         program: self.config.latex_svg_cmd.clone(),
                         args: vec![
+                            "--bbox=min".into(),
                             "-o".into(),
                             output_str,
                             dvi_str,

@@ -1478,13 +1478,13 @@ pub struct ImportsConfig {
     pub alias_ix: Option<u32>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MathPreviewKind {
     Inline,
     Block,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MathPreviewBackend {
     Latex,
     Typst,
@@ -3181,7 +3181,7 @@ mod tests {
         .expect("Could not parse markdown-inline previews query");
 
         let grammar = language.grammar.as_ref().expect("missing grammar");
-        let map = grammar
+        let math_preview_cfg = grammar
             .math_preview_config
             .as_ref()
             .expect("missing math preview map");
@@ -3196,16 +3196,17 @@ mod tests {
             .expect("failed to parse markdown inline text");
 
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&map.query, tree.root_node(), text.as_bytes());
+        let mut matches = cursor.matches(&math_preview_cfg.query, tree.root_node(), text.as_bytes());
         let mut captures = Vec::new();
         while let Some(mat) = matches.next() {
+            dbg!(mat);
             for capture in mat.captures {
-                if let Some((_, preview_capture)) = map
+                if let Some((_, preview_capture)) = math_preview_cfg
                     .math_preview_captures_by_ix
                     .iter()
                     .find(|(ix, _)| *ix == capture.index)
                 {
-                    let name = map.query.capture_names()[capture.index as usize].to_string();
+                    let name = math_preview_cfg.query.capture_names()[capture.index as usize].to_string();
                     let kind = match preview_capture.kind {
                         MathPreviewKind::Inline => "inline",
                         MathPreviewKind::Block => "block",
@@ -3232,9 +3233,21 @@ mod tests {
                     "$$y$$".to_string()
                 ),
                 (
+                    "math.block.typst".to_string(),
+                    "block",
+                    "typst",
+                    "$$y$$".to_string()
+                ),
+                (
                     "math.inline.latex".to_string(),
                     "inline",
                     "latex",
+                    "$x^2$".to_string()
+                ),
+                (
+                    "math.inline.typst".to_string(),
+                    "inline",
+                    "typst",
                     "$x^2$".to_string()
                 ),
             ]

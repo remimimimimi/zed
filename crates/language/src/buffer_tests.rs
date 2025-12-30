@@ -2896,6 +2896,140 @@ fn test_language_at_for_markdown_code_block(cx: &mut App) {
 }
 
 #[gpui::test]
+fn test_math_fragments_for_markdown_inline(cx: &mut App) {
+    init_settings(cx, |_| {});
+
+    cx.new(|cx| {
+        let text = r"Inline $x^2$ and $$y$$ and \(z\) and \[w\].";
+
+        let language_registry = Arc::new(LanguageRegistry::test(cx.background_executor().clone()));
+        language_registry.add(markdown_lang());
+        language_registry.add(Arc::new(markdown_inline_lang()));
+
+        let mut buffer = Buffer::local(text, cx);
+        buffer.set_language_registry(language_registry.clone());
+        buffer.set_language(
+            language_registry
+                .language_for_name("Markdown")
+                .now_or_never()
+                .unwrap()
+                .ok(),
+            cx,
+        );
+
+        let snapshot = buffer.snapshot();
+        let fragments = snapshot
+            .math_fragments(0..snapshot.len())
+            .map(|fragment| {
+                (
+                    snapshot
+                        .text_for_range(fragment.range.clone())
+                        .collect::<String>()
+                        .trim()
+                        .to_string(),
+                    fragment.kind,
+                    fragment.backend,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            fragments,
+            vec![
+                (
+                    "x^2".to_string(),
+                    MathPreviewKind::Inline,
+                    MathPreviewBackend::Latex
+                ),
+                (
+                    "y".to_string(),
+                    MathPreviewKind::Block,
+                    MathPreviewBackend::Latex
+                ),
+                (
+                    "z".to_string(),
+                    MathPreviewKind::Inline,
+                    MathPreviewBackend::Latex
+                ),
+                (
+                    "w".to_string(),
+                    MathPreviewKind::Block,
+                    MathPreviewBackend::Latex
+                ),
+            ]
+        );
+
+        buffer
+    });
+}
+
+#[gpui::test]
+fn test_math_fragments_for_consecutive_math_blocks(cx: &mut App) {
+    init_settings(cx, |_| {});
+
+    cx.new(|cx| {
+        let text = r"
+$$
+a
+$$
+$$
+b
+$$
+"
+        .unindent();
+
+        let language_registry = Arc::new(LanguageRegistry::test(cx.background_executor().clone()));
+        language_registry.add(markdown_lang());
+        language_registry.add(Arc::new(markdown_inline_lang()));
+
+        let mut buffer = Buffer::local(text, cx);
+        buffer.set_language_registry(language_registry.clone());
+        buffer.set_language(
+            language_registry
+                .language_for_name("Markdown")
+                .now_or_never()
+                .unwrap()
+                .ok(),
+            cx,
+        );
+
+        let snapshot = buffer.snapshot();
+        let fragments = snapshot
+            .math_fragments(0..snapshot.len())
+            .map(|fragment| {
+                (
+                    snapshot
+                        .text_for_range(fragment.range.clone())
+                        .collect::<String>()
+                        .trim()
+                        .to_string(),
+                    fragment.kind,
+                    fragment.backend,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            fragments,
+            vec![
+                (
+                    "a".to_string(),
+                    MathPreviewKind::Block,
+                    MathPreviewBackend::Latex
+                ),
+                (
+                    "b".to_string(),
+                    MathPreviewKind::Block,
+                    MathPreviewBackend::Latex
+                )
+            ]
+        );
+
+        buffer
+    });
+}
+
+#[gpui::test]
 fn test_syntax_layer_at_for_injected_languages(cx: &mut App) {
     init_settings(cx, |_| {});
 
@@ -3938,6 +4072,10 @@ pub fn markdown_inline_lang() -> Language {
         Some(tree_sitter_md::INLINE_LANGUAGE.into()),
     )
     .with_highlights_query("(emphasis) @emphasis")
+    .unwrap()
+    .with_math_previews_query(include_str!(
+        "../../languages/src/markdown-inline/math_previews.scm"
+    ))
     .unwrap()
 }
 

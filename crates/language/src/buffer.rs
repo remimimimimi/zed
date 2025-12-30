@@ -1,8 +1,8 @@
 pub mod row_chunk;
 
 use crate::{
-    DebuggerTextObject, LanguageScope, Outline, OutlineConfig, PLAIN_TEXT, RunnableCapture,
-    RunnableTag, TextObject, TreeSitterOptions,
+    DebuggerTextObject, LanguageScope, MathPreviewBackend, MathPreviewKind, Outline, OutlineConfig,
+    PLAIN_TEXT, RunnableCapture, RunnableTag, TextObject, TreeSitterOptions,
     diagnostic_set::{DiagnosticEntry, DiagnosticEntryRef, DiagnosticGroup},
     language_settings::{LanguageSettings, language_settings},
     outline::OutlineItem,
@@ -45,7 +45,7 @@ use std::{
     borrow::Cow,
     cell::Cell,
     cmp::{self, Ordering, Reverse},
-    collections::{BTreeMap, BTreeSet},
+    collections::{hash_map, BTreeMap, BTreeSet, VecDeque},
     future::Future,
     iter::{self, Iterator, Peekable},
     mem,
@@ -928,6 +928,21 @@ impl<T> BracketMatch<T> {
     pub fn bracket_ranges(self) -> (Range<T>, Range<T>) {
         (self.open_range, self.close_range)
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MathFragment {
+    pub range: Range<usize>,
+    pub kind: MathPreviewKind,
+    pub backend: MathPreviewBackend,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CaptureOffset {
+    start_row: i64,
+    start_col: i64,
+    end_row: i64,
+    end_col: i64,
 }
 
 impl Buffer {
@@ -4705,6 +4720,261 @@ impl BufferSnapshot {
         }
 
         result
+    }
+
+    pub fn math_ranges<T: ToOffset>(
+        &self,
+        range: Range<T>,
+    ) -> impl Iterator<Item = Range<usize>> + '_ {
+        self.math_fragments(range).map(|fragment| fragment.range)
+    }
+
+    pub fn math_fragments<T: ToOffset>(
+        &self,
+        range: Range<T>,
+    ) -> impl Iterator<Item = MathFragment> + '_ {
+        let start = range.start.to_offset(self);
+        let end = range.end.to_offset(self);
+        let offset_range = if start == end {
+            range.start.to_previous_offset(self)..self.len().min(range.end.to_next_offset(self))
+        } else {
+            start..end
+        };
+
+        let mut syntax_matches = self.syntax.matches(offset_range, &self.text, |grammar| {
+            grammar
+                .math_preview_config
+                .as_ref()
+                .map(|config| &config.query)
+        });
+
+        let configs = syntax_matches
+            .grammars()
+            .iter()
+            .map(|grammar| grammar.math_preview_config.as_ref())
+            .collect::<Vec<_>>();
+        let text = &self.text;
+        let mut fragments_by_key: HashMap<(Range<usize>, u8), MathFragment> = HashMap::default();
+        let mut order = Vec::new();
+
+        fn kind_key(kind: MathPreviewKind) -> u8 {
+            match kind {
+                MathPreviewKind::Inline => 0,
+                MathPreviewKind::Block => 1,
+            }
+        }
+
+        fn backend_priority(backend: MathPreviewBackend) -> u8 {
+            match backend {
+                MathPreviewBackend::Latex => 1,
+                MathPreviewBackend::Typst => 0,
+            }
+        }
+
+        while let Some(mat) = syntax_matches.peek() {
+            let Some(config) = configs[mat.grammar_index].as_ref() else {
+                syntax_matches.advance();
+                continue;
+            };
+            for capture in mat.captures {
+                let Ok(ix) = config
+                    .math_preview_captures_by_ix
+                    .binary_search_by_key(&capture.index, |entry| entry.0)
+                else {
+                    continue;
+                };
+                let preview_capture = &config.math_preview_captures_by_ix[ix].1;
+                let range = Self::apply_math_preview_predicates(
+                    text,
+                    &config.query,
+                    mat.pattern_index,
+                    capture.index,
+                    mat.captures,
+                    capture.node.byte_range(),
+                );
+                let fragment = MathFragment {
+                    range: range.clone(),
+                    kind: preview_capture.kind,
+                    backend: preview_capture.backend,
+                };
+                let key = (range, kind_key(fragment.kind));
+                match fragments_by_key.entry(key.clone()) {
+                    hash_map::Entry::Vacant(entry) => {
+                        entry.insert(fragment);
+                        order.push(key);
+                    }
+                    hash_map::Entry::Occupied(mut entry) => {
+                        if backend_priority(fragment.backend)
+                            > backend_priority(entry.get().backend)
+                        {
+                            entry.insert(fragment);
+                        }
+                    }
+                }
+            }
+
+            syntax_matches.advance();
+        }
+
+        let mut fragments = Vec::with_capacity(order.len());
+        for key in order {
+            if let Some(fragment) = fragments_by_key.remove(&key) {
+                fragments.push(fragment);
+            }
+        }
+        fragments.sort_by(|a, b| {
+            a.range
+                .start
+                .cmp(&b.range.start)
+                .then(a.range.end.cmp(&b.range.end))
+        });
+        fragments.into_iter()
+    }
+
+    fn apply_math_preview_predicates<'a>(
+        text: &TextBufferSnapshot,
+        query: &tree_sitter::Query,
+        pattern_index: usize,
+        capture_index: u32,
+        captures: &[tree_sitter::QueryCapture<'a>],
+        range: Range<usize>,
+    ) -> Range<usize> {
+        let mut adjusted = range;
+        for predicate in query.general_predicates(pattern_index) {
+            if predicate.operator.as_ref() != "make-range!" {
+                continue;
+            }
+            let Some((target, start, end)) =
+                Self::parse_math_preview_make_range(&predicate.args)
+            else {
+                continue;
+            };
+            if target != capture_index {
+                continue;
+            }
+            if let Some(next_range) = Self::capture_range_between(captures, start, end) {
+                adjusted = next_range;
+            }
+        }
+
+        for predicate in query.general_predicates(pattern_index) {
+            if predicate.operator.as_ref() != "offset!" {
+                continue;
+            }
+            let Some((target, offset)) = Self::parse_math_preview_offset(&predicate.args) else {
+                continue;
+            };
+            if target != capture_index {
+                continue;
+            }
+            if let Some(next_range) = Self::apply_preview_offset(text, adjusted.clone(), offset) {
+                adjusted = next_range;
+            }
+        }
+        adjusted
+    }
+
+    fn parse_math_preview_make_range(
+        args: &[tree_sitter::QueryPredicateArg],
+    ) -> Option<(u32, u32, u32)> {
+        if args.len() != 3 {
+            return None;
+        }
+        let target = match args[0] {
+            tree_sitter::QueryPredicateArg::Capture(capture_ix) => capture_ix,
+            _ => return None,
+        };
+        let start = match args[1] {
+            tree_sitter::QueryPredicateArg::Capture(capture_ix) => capture_ix,
+            _ => return None,
+        };
+        let end = match args[2] {
+            tree_sitter::QueryPredicateArg::Capture(capture_ix) => capture_ix,
+            _ => return None,
+        };
+        Some((target, start, end))
+    }
+
+    fn capture_range_between(
+        captures: &[tree_sitter::QueryCapture<'_>],
+        start: u32,
+        end: u32,
+    ) -> Option<Range<usize>> {
+        let start_range = captures
+            .iter()
+            .find(|capture| capture.index == start)
+            .map(|capture| capture.node.byte_range())?;
+        let end_range = captures
+            .iter()
+            .find(|capture| capture.index == end)
+            .map(|capture| capture.node.byte_range())?;
+        if start_range.start > end_range.end {
+            return None;
+        }
+        Some(start_range.start..end_range.end)
+    }
+
+    fn parse_math_preview_offset(
+        args: &[tree_sitter::QueryPredicateArg],
+    ) -> Option<(u32, CaptureOffset)> {
+        let (first, rest) = args.split_first()?;
+        let capture_ix = match first {
+            tree_sitter::QueryPredicateArg::Capture(capture_ix) => *capture_ix,
+            _ => return None,
+        };
+        if rest.len() != 4 {
+            return None;
+        }
+        let mut values = [0i64; 4];
+        for (value, arg) in values.iter_mut().zip(rest.iter()) {
+            *value = Self::parse_math_preview_offset_value(arg)?;
+        }
+        Some((
+            capture_ix,
+            CaptureOffset {
+                start_row: values[0],
+                start_col: values[1],
+                end_row: values[2],
+                end_col: values[3],
+            },
+        ))
+    }
+
+    fn parse_math_preview_offset_value(arg: &tree_sitter::QueryPredicateArg) -> Option<i64> {
+        match arg {
+            tree_sitter::QueryPredicateArg::String(value) => value.parse().ok(),
+            _ => None,
+        }
+    }
+
+    fn apply_preview_offset(
+        text: &TextBufferSnapshot,
+        range: Range<usize>,
+        offset: CaptureOffset,
+    ) -> Option<Range<usize>> {
+        let start_point = text.offset_to_point(range.start);
+        let end_point = text.offset_to_point(range.end);
+        let start_point = Self::offset_point(start_point, offset.start_row, offset.start_col)?;
+        let end_point = Self::offset_point(end_point, offset.end_row, offset.end_col)?;
+        let start = text.point_to_offset(start_point);
+        let end = text.point_to_offset(end_point);
+        (start <= end).then_some(start..end)
+    }
+
+    fn offset_point(point: Point, row_delta: i64, col_delta: i64) -> Option<Point> {
+        let row = point.row as i64 + row_delta;
+        if row < 0 {
+            return None;
+        }
+        let col = if row_delta == 0 {
+            point.column as i64 + col_delta
+        } else {
+            col_delta
+        };
+        if col < 0 {
+            return None;
+        }
+        Some(Point::new(row as u32, col as u32))
     }
 
     /// Returns anchor ranges for any matches of the redaction query.
