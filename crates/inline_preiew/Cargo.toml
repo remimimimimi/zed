@@ -16,3 +16,4 @@ tempfile.workspace = true
 futures.workspace = true
 smol.workspace = true
 tracing.workspace = true
+which.workspace = true

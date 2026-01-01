@@ -1,3 +1,4 @@
+use crate::math_previews::scale_svg_to_height;
 use crate::{
     ActiveDiagnostic, BlockId, CURSORS_VISIBLE_FOR, ChunkRendererContext, ChunkReplacement,
     CodeActionSource, ColumnarMode, ConflictsOurs, ConflictsOursMarker, ConflictsOuter,
@@ -53,7 +54,6 @@ use gpui::{
 };
 use itertools::Itertools;
 use language::{IndentGuideSettings, language_settings::ShowWhitespaceSetting};
-use crate::math_previews::scale_svg_to_height;
 use markdown::Markdown;
 use multi_buffer::{
     Anchor, ExcerptId, ExcerptInfo, ExpandExcerptDirection, ExpandInfo, MultiBufferPoint,
@@ -2684,7 +2684,12 @@ impl EditorElement {
             .text_color(cx.theme().colors().editor_foreground)
             .into_any();
 
-        element.prepaint_as_root(point(start_x, start_y), AvailableSpace::min_size(), window, cx);
+        element.prepaint_as_root(
+            point(start_x, start_y),
+            AvailableSpace::min_size(),
+            window,
+            cx,
+        );
 
         Some(element)
     }

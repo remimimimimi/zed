@@ -5,19 +5,19 @@ use gpui::{
     Task, Window, div, px, size, svg,
 };
 use inline_preiew::{Backend as RenderBackend, RenderContext};
-use language::{LanguageName, MathPreviewBackend, MathPreviewKind};
 use language::language_settings::language_settings;
+use language::{LanguageName, MathPreviewBackend, MathPreviewKind};
 use multi_buffer::{Anchor, MultiBufferOffset, ToOffset};
 use regex::Regex;
 use std::{
     any::TypeId,
     ops::Range,
     path::Path,
-    sync::{Arc, OnceLock, Mutex, Weak},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::Duration,
 };
-use theme::ActiveTheme;
 use text::BufferId;
+use theme::ActiveTheme;
 
 fn shared_render_context() -> Arc<RenderContext> {
     static CONTEXT: OnceLock<Arc<RenderContext>> = OnceLock::new();
@@ -96,6 +96,7 @@ struct MathPreviewEntry {
 
 struct MathPreviewFold;
 
+#[derive(Clone)]
 struct RenderRequest {
     range: Range<MultiBufferOffset>,
     kind: MathPreviewKind,
@@ -103,6 +104,13 @@ struct RenderRequest {
     content: String,
     inline_enabled: bool,
     popover_enabled: bool,
+}
+
+#[derive(Clone)]
+struct RenderCandidate {
+    request: RenderRequest,
+    key: u64,
+    has_cache: bool,
 }
 
 #[derive(Clone)]
@@ -117,7 +125,10 @@ struct MathPreviewSettings {
     popover_enabled: bool,
 }
 
-fn clip_range_to_len(range: &Range<MultiBufferOffset>, len: usize) -> Option<Range<MultiBufferOffset>> {
+fn clip_range_to_len(
+    range: &Range<MultiBufferOffset>,
+    len: usize,
+) -> Option<Range<MultiBufferOffset>> {
     if range.start.0 >= len {
         return None;
     }
@@ -239,93 +250,27 @@ impl Editor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let display_snapshot = self.display_snapshot(cx);
-        let selection_head = self.selections.newest_anchor().head();
-        let selection_head_offset = selection_head.to_offset(display_snapshot.buffer_snapshot());
-        let selection_fingerprint = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            for sel in self
-                .selections
-                .all::<MultiBufferOffset>(&display_snapshot)
-            {
-                sel.range().hash(&mut hasher);
-            }
-            hasher.finish()
-        };
-
-        let style = self.style(cx);
-        let font_id = window.text_system().resolve_font(&style.text.font());
-        let font_size = style.text.font_size.to_pixels(window.rem_size());
-        let ascent = window.text_system().ascent(font_id, font_size);
-        let descent = -window.text_system().descent(font_id, font_size);
-        let text_box_height = (ascent + descent).max(px(1.));
-
-        let mut popover = None;
-        for entry in &self.math_previews.rendered {
-            if popover.is_none()
-                && entry.popover_enabled
-                && matches!(entry.kind, MathPreviewKind::Inline)
-                && entry.range.contains(&selection_head_offset)
-            {
-                popover = Some(MathPreviewPopover {
-                    anchor: selection_head,
-                    svg_path: entry.svg_path.clone(),
-                    size: scale_svg_to_height(entry.size, text_box_height),
-                });
-                break;
-            }
-        }
-
-        if popover != self.math_previews.popover {
-            self.math_previews.popover = popover;
-            cx.notify();
-        }
-
         if self.math_previews.rendered.is_empty() {
             return;
         }
 
-        if selection_fingerprint != self.math_previews.last_selection_fingerprint {
-            self.math_previews.last_selection_fingerprint = selection_fingerprint;
-            let selections = self
-                .selections
-                .all::<MultiBufferOffset>(&display_snapshot)
-                .into_iter()
-                .map(|sel| sel.range())
-                .collect::<Vec<_>>();
-            let mut overlap_ranges = Vec::new();
-            let mut block_overlap = false;
-            for entry in &self.math_previews.rendered {
-                if selections
-                    .iter()
-                    .any(|sel| ranges_overlap(&entry.range, sel))
-                {
-                    overlap_ranges.push(entry.range.clone());
-                    if matches!(entry.kind, MathPreviewKind::Block) {
-                        block_overlap = true;
-                    }
-                }
+        let display_snapshot = self.display_snapshot(cx);
+        let selection_fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for sel in self.selections.all::<MultiBufferOffset>(&display_snapshot) {
+                sel.range().hash(&mut hasher);
+                sel.head().hash(&mut hasher);
             }
+            hasher.finish()
+        };
 
-            let type_id = TypeId::of::<MathPreviewFold>();
-            if !overlap_ranges.is_empty() {
-                let buffer_len = display_snapshot.buffer_snapshot().len().0;
-                let clipped: Vec<_> = overlap_ranges
-                    .into_iter()
-                    .filter_map(|range| clip_range_to_len(&range, buffer_len))
-                    .collect();
-                if !clipped.is_empty() {
-                    self.display_map.update(cx, |display_map, cx| {
-                        display_map.remove_folds_with_type(clipped, type_id, cx);
-                    });
-                }
-            }
-            if block_overlap && !self.math_previews.block_ids.is_empty() {
-                let block_ids = std::mem::take(&mut self.math_previews.block_ids);
-                self.remove_blocks(block_ids, None, cx);
-            }
+        if selection_fingerprint == self.math_previews.last_selection_fingerprint {
+            return;
         }
+
+        self.math_previews.last_selection_fingerprint = selection_fingerprint;
+        self.rebuild_math_previews(Vec::new(), window, cx, true);
     }
 
     pub(crate) fn math_preview_popover(&self) -> Option<MathPreviewPopover> {
@@ -374,23 +319,22 @@ impl Editor {
         }
 
         let display_snapshot = self.display_snapshot(cx);
-        let selections = self
-            .selections
-            .all::<MultiBufferOffset>(&display_snapshot);
+        let selections = self.selections.all::<MultiBufferOffset>(&display_snapshot);
         let selection_head = self.selections.newest_anchor().head();
         let selection_head_offset = selection_head.to_offset(display_snapshot.buffer_snapshot());
         let style = self.style(cx);
         let line_height = style.text.line_height_in_pixels(window.rem_size());
         let font_id = window.text_system().resolve_font(&style.text.font());
         let font_size = style.text.font_size.to_pixels(window.rem_size());
-        let ascent = window.text_system().ascent(font_id, font_size);
-        let descent = -window.text_system().descent(font_id, font_size);
-        let _text_box_height = (ascent + descent).max(px(1.));
-        let inline_target_height = line_height * 1.1;
+        let _ascent = window.text_system().ascent(font_id, font_size);
+        let _descent = -window.text_system().descent(font_id, font_size);
+        let _text_box_height = (_ascent + _descent).max(px(1.));
+        let inline_target_height = line_height * 1.35;
 
         let mut popover = None;
         let mut creases = Vec::new();
         let mut blocks = Vec::new();
+        let mut retained_ranges: Vec<Range<MultiBufferOffset>> = Vec::new();
 
         // Ensure deterministic order to avoid fold overlaps when ranges are adjacent.
         self.math_previews
@@ -420,7 +364,7 @@ impl Editor {
                 .iter()
                 .any(|selection| ranges_overlap(&clipped_range, &selection.range()))
             {
-                // Hide inline previews while editing inside, but keep block previews visible.
+                // Keep inline math editable while the cursor overlaps it.
                 if matches!(entry.kind, MathPreviewKind::Inline) {
                     continue;
                 }
@@ -439,15 +383,16 @@ impl Editor {
                         let display_size = scale_svg_to_height(entry.size, inline_target_height);
                         let placeholder = math_placeholder(entry, display_size, line_height);
                         creases.push(Crease::simple(clipped_range.clone(), placeholder));
+                        retained_ranges.push(clipped_range.clone());
                     }
                 }
                 MathPreviewKind::Block => {
                     if include_blocks && entry.inline_enabled {
                         let natural_lines =
-                            ((entry.size.height / line_height).ceil().max(1.0)) as u32;
-                        let lines = natural_lines.max(span_lines).max(1);
+                            ((entry.size.height / line_height).ceil().max(2.0)) as u32;
+                        let lines = natural_lines.max(span_lines).max(2);
                         let display_size =
-                            scale_svg_to_height(entry.size, line_height * lines as f32 * 1.05);
+                            scale_svg_to_height(entry.size, line_height * lines as f32 * 1.2);
                         let height = lines;
                         let start = display_snapshot
                             .buffer_snapshot()
@@ -455,6 +400,7 @@ impl Editor {
                         let end = display_snapshot
                             .buffer_snapshot()
                             .anchor_after(clipped_range.end);
+                        retained_ranges.push(clipped_range.clone());
                         blocks.push(BlockProperties {
                             placement: BlockPlacement::Replace(start..=end),
                             height: Some(height),
@@ -472,7 +418,16 @@ impl Editor {
                 let buffer_len = display_snapshot.buffer_snapshot().len().0;
                 let clipped: Vec<_> = ranges_to_remove
                     .into_iter()
-                    .filter_map(|range| clip_range_to_len(&range, buffer_len))
+                    .filter_map(|range| {
+                        let clipped = clip_range_to_len(&range, buffer_len)?;
+                        if retained_ranges
+                            .iter()
+                            .any(|retained| ranges_overlap(&clipped, retained))
+                        {
+                            return None;
+                        }
+                        Some(clipped)
+                    })
                     .collect();
                 if !clipped.is_empty() {
                     display_map.remove_folds_with_type(clipped, type_id, cx);
@@ -489,15 +444,13 @@ impl Editor {
                             render_toggle,
                             render_trailer,
                             metadata,
-                        } => {
-                            clip_range_to_len(&range, buffer_len).map(|range| Crease::Inline {
-                                range,
-                                placeholder,
-                                render_toggle,
-                                render_trailer,
-                                metadata,
-                            })
-                        }
+                        } => clip_range_to_len(&range, buffer_len).map(|range| Crease::Inline {
+                            range,
+                            placeholder,
+                            render_toggle,
+                            render_trailer,
+                            metadata,
+                        }),
                         Crease::Block { .. } => None,
                     })
                     .collect();
@@ -558,12 +511,15 @@ fn math_placeholder(
 ) -> FoldPlaceholder {
     let path = entry.svg_path.clone();
     let size = display_size;
+    let vertical_pad = (line_height - size.height).max(Pixels::ZERO) / 2.0;
     FoldPlaceholder {
         render: Arc::new(move |_, _, cx| {
             div()
                 .flex()
-                .items_end()
+                .items_center()
                 .h(line_height)
+                .pt(vertical_pad)
+                .pb(vertical_pad)
                 .child(
                     svg()
                         .external_path(path.clone())
@@ -599,10 +555,7 @@ fn math_block(
     })
 }
 
-fn ranges_overlap(
-    range: &Range<MultiBufferOffset>,
-    selection: &Range<MultiBufferOffset>,
-) -> bool {
+fn ranges_overlap(range: &Range<MultiBufferOffset>, selection: &Range<MultiBufferOffset>) -> bool {
     if selection.start == selection.end {
         range.contains(&selection.start)
     } else {
@@ -640,7 +593,8 @@ async fn render_math_previews(
     default_preview_settings: MathPreviewSettings,
     mut render_cache: HashMap<u64, RenderedSvg>,
 ) -> (Vec<MathPreviewEntry>, HashMap<u64, RenderedSvg>) {
-    let mut requests = Vec::new();
+    let mut candidates: HashMap<(Range<MultiBufferOffset>, MathPreviewKind), RenderCandidate> =
+        HashMap::default();
     for (range, fragment, buffer_snapshot) in snapshot.math_fragments(visible_range.clone()) {
         let expanded_range = expand_math_range(range.clone(), &snapshot);
         if expanded_range == range {
@@ -649,7 +603,9 @@ async fn render_math_previews(
         if !ranges_overlap(&expanded_range, &visible_range) {
             continue;
         }
-        let language_name = buffer_snapshot.language_at(fragment.range.start).map(|lang| lang.name());
+        let language_name = buffer_snapshot
+            .language_at(fragment.range.start)
+            .map(|lang| lang.name());
         let preview_settings = preview_settings_by_language
             .get(&language_name)
             .copied()
@@ -663,15 +619,43 @@ async fn render_math_previews(
         if content.trim().is_empty() {
             continue;
         }
-        requests.push(RenderRequest {
+
+        let request = RenderRequest {
             range: expanded_range,
             kind: fragment.kind,
             backend: fragment.backend,
             content: wrap_math_fragment(fragment.kind, fragment.backend, &content),
             inline_enabled: preview_settings.inline_enabled,
             popover_enabled: preview_settings.popover_enabled,
-        });
+        };
+        let key = render_key(&request);
+        let has_cache = cached_svg(&mut render_cache, key).is_some();
+        let backend_available =
+            render_context.backend_available(to_render_backend(request.backend));
+        if !has_cache && !backend_available {
+            continue;
+        }
+
+        let candidate = RenderCandidate {
+            request,
+            key,
+            has_cache,
+        };
+        let candidate_key = (candidate.request.range.clone(), candidate.request.kind);
+        if let Some(existing) = candidates.get_mut(&candidate_key) {
+            if should_replace_candidate(&candidate, existing, render_context) {
+                *existing = candidate;
+            }
+        } else {
+            candidates.insert(candidate_key, candidate);
+        }
     }
+
+    let mut requests: Vec<_> = candidates
+        .into_values()
+        .map(|candidate| candidate.request)
+        .collect();
+    requests.sort_by_key(|request| request.range.start.0);
 
     let mut by_backend: HashMap<RenderBackend, Vec<(usize, u64, String)>> = HashMap::default();
     for (idx, request) in requests.iter().enumerate() {
@@ -686,10 +670,11 @@ async fn render_math_previews(
     for (backend, entries) in by_backend {
         let mut to_render = Vec::new();
         let mut index_iter = Vec::new();
+        let backend_available = render_context.backend_available(backend);
         for (idx, key, content) in entries {
-            if let Some(cached) = render_cache.get(&key) {
-                rendered[idx] = Some(cached.clone());
-            } else {
+            if let Some(cached) = cached_svg(&mut render_cache, key) {
+                rendered[idx] = Some(cached);
+            } else if backend_available {
                 to_render.push(content);
                 index_iter.push((idx, key));
             }
@@ -741,11 +726,50 @@ async fn render_math_previews(
     (entries, render_cache)
 }
 
-fn wrap_math_fragment(
-    kind: MathPreviewKind,
-    backend: MathPreviewBackend,
-    content: &str,
-) -> String {
+fn should_replace_candidate(
+    candidate: &RenderCandidate,
+    current: &RenderCandidate,
+    render_context: &RenderContext,
+) -> bool {
+    if candidate.has_cache && !current.has_cache {
+        return true;
+    }
+    if current.has_cache && !candidate.has_cache {
+        return false;
+    }
+
+    let candidate_available =
+        render_context.backend_available(to_render_backend(candidate.request.backend));
+    let current_available =
+        render_context.backend_available(to_render_backend(current.request.backend));
+
+    match (candidate_available, current_available) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => {
+            backend_priority(candidate.request.backend) > backend_priority(current.request.backend)
+        }
+    }
+}
+
+fn cached_svg(render_cache: &mut HashMap<u64, RenderedSvg>, key: u64) -> Option<RenderedSvg> {
+    if let Some(cached) = render_cache.get(&key) {
+        if Path::new(cached.path.as_str()).is_file() {
+            return Some(cached.clone());
+        }
+        render_cache.remove(&key);
+    }
+    None
+}
+
+fn backend_priority(backend: MathPreviewBackend) -> u8 {
+    match backend {
+        MathPreviewBackend::Latex => 1,
+        MathPreviewBackend::Typst => 0,
+    }
+}
+
+fn wrap_math_fragment(kind: MathPreviewKind, backend: MathPreviewBackend, content: &str) -> String {
     match backend {
         MathPreviewBackend::Latex => match kind {
             MathPreviewKind::Inline => format!("${}$", content),
@@ -873,9 +897,7 @@ fn find_delimiters(
         idx -= 1;
     }
     for candidate in prefix_candidates {
-        if idx >= candidate.len()
-            && &bytes[idx - candidate.len()..idx] == *candidate
-        {
+        if idx >= candidate.len() && &bytes[idx - candidate.len()..idx] == *candidate {
             prefix = Some((idx - candidate.len(), candidate.len()));
             break;
         }
@@ -887,8 +909,7 @@ fn find_delimiters(
         idx += 1;
     }
     for candidate in suffix_candidates {
-        if idx + candidate.len() <= bytes.len()
-            && &bytes[idx..idx + candidate.len()] == *candidate
+        if idx + candidate.len() <= bytes.len() && &bytes[idx..idx + candidate.len()] == *candidate
         {
             suffix = Some((idx, candidate.len()));
             break;

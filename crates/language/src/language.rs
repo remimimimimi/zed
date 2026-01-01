@@ -1478,13 +1478,13 @@ pub struct ImportsConfig {
     pub alias_ix: Option<u32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Hash, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MathPreviewKind {
     Inline,
     Block,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Hash, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MathPreviewBackend {
     Latex,
     Typst,
@@ -3196,7 +3196,8 @@ mod tests {
             .expect("failed to parse markdown inline text");
 
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&math_preview_cfg.query, tree.root_node(), text.as_bytes());
+        let mut matches =
+            cursor.matches(&math_preview_cfg.query, tree.root_node(), text.as_bytes());
         let mut captures = Vec::new();
         while let Some(mat) = matches.next() {
             dbg!(mat);
@@ -3206,7 +3207,8 @@ mod tests {
                     .iter()
                     .find(|(ix, _)| *ix == capture.index)
                 {
-                    let name = math_preview_cfg.query.capture_names()[capture.index as usize].to_string();
+                    let name =
+                        math_preview_cfg.query.capture_names()[capture.index as usize].to_string();
                     let kind = match preview_capture.kind {
                         MathPreviewKind::Inline => "inline",
                         MathPreviewKind::Block => "block",

@@ -2942,9 +2942,19 @@ fn test_math_fragments_for_markdown_inline(cx: &mut App) {
                     MathPreviewBackend::Latex
                 ),
                 (
+                    "x^2".to_string(),
+                    MathPreviewKind::Inline,
+                    MathPreviewBackend::Typst
+                ),
+                (
                     "y".to_string(),
                     MathPreviewKind::Block,
                     MathPreviewBackend::Latex
+                ),
+                (
+                    "y".to_string(),
+                    MathPreviewKind::Block,
+                    MathPreviewBackend::Typst
                 ),
                 (
                     "z".to_string(),
@@ -2952,9 +2962,19 @@ fn test_math_fragments_for_markdown_inline(cx: &mut App) {
                     MathPreviewBackend::Latex
                 ),
                 (
+                    "z".to_string(),
+                    MathPreviewKind::Inline,
+                    MathPreviewBackend::Typst
+                ),
+                (
                     "w".to_string(),
                     MathPreviewKind::Block,
                     MathPreviewBackend::Latex
+                ),
+                (
+                    "w".to_string(),
+                    MathPreviewKind::Block,
+                    MathPreviewBackend::Typst
                 ),
             ]
         );
@@ -3018,9 +3038,19 @@ $$
                     MathPreviewBackend::Latex
                 ),
                 (
+                    "a".to_string(),
+                    MathPreviewKind::Block,
+                    MathPreviewBackend::Typst
+                ),
+                (
                     "b".to_string(),
                     MathPreviewKind::Block,
                     MathPreviewBackend::Latex
+                ),
+                (
+                    "b".to_string(),
+                    MathPreviewKind::Block,
+                    MathPreviewBackend::Typst
                 )
             ]
         );

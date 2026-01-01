@@ -1,14 +1,14 @@
 //! Batched math rendering for LaTeX and Typst.
 
 use std::collections::HashMap;
-use std::{fs, iter};
 use std::hash::{Hash, Hasher};
+use std::io::Write;
 use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Mutex;
 use std::thread;
-use std::io::Write;
+use std::{fs, iter};
 
 use futures::stream::{self, StreamExt};
 use smol::io;
@@ -38,6 +38,7 @@ pub struct RenderConfig {
 pub struct RenderContext {
     config: RenderConfig,
     cache: Mutex<HashMap<CacheKey, process::Output>>,
+    availability: Mutex<HashMap<String, bool>>,
     cache_dir: TempDir,
 }
 
@@ -72,7 +73,7 @@ impl RenderConfig {
     pub fn new() -> Self {
         Self {
             // Use standalone with zero border to eliminate padding around rendered math.
-            preamble_latex: "\\documentclass[preview,border=0pt]{standalone}\n\\usepackage{newtxtext}\n\\usepackage{newtxmath}\n\\usepackage{amsmath}\n\\begin{document}".into(),
+            preamble_latex: "\\documentclass[preview,border=0pt,12pt]{standalone}\n\\usepackage[T1]{fontenc}\n\\usepackage[utf8]{inputenc}\n\\usepackage{lmodern}\n\\usepackage{amsmath,amssymb}\n\\usepackage{mathtools}\n\\begin{document}".into(),
             preamble_typst: "#set page(width: auto, height: auto, margin: 0pt)\n".into(),
             postamble_latex: "\\end{document}".into(),
             postamble_typst: "".into(),
@@ -97,6 +98,7 @@ impl RenderContext {
         Self {
             config,
             cache: Mutex::new(HashMap::new()),
+            availability: Mutex::new(HashMap::new()),
             cache_dir,
         }
     }
@@ -110,20 +112,54 @@ impl RenderContext {
             || self.config.preamble_typst != config.preamble_typst;
         let postamble_changed = self.config.postamble_latex != config.postamble_latex
             || self.config.postamble_typst != config.postamble_typst;
-        if preamble_changed || postamble_changed {
+        let commands_changed = self.config.latex_cmd != config.latex_cmd
+            || self.config.latex_svg_cmd != config.latex_svg_cmd
+            || self.config.typst_cmd != config.typst_cmd;
+        if preamble_changed || postamble_changed || commands_changed {
             self.invalidate_cache("config change");
+        }
+        if commands_changed {
+            self.availability.lock().unwrap().clear();
         }
         self.config = config;
     }
 
-    fn render_cmds(&self, backend: Backend, input_path: &Path, output_path: &Path) -> Vec<RenderCommand> {
+    pub fn backend_available(&self, backend: Backend) -> bool {
+        match backend {
+            Backend::LaTeX => {
+                self.command_available(&self.config.latex_cmd)
+                    && self.command_available(&self.config.latex_svg_cmd)
+            }
+            Backend::Typst => self.command_available(&self.config.typst_cmd),
+        }
+    }
+
+    fn command_available(&self, command: &str) -> bool {
+        let mut availability = self.availability.lock().unwrap();
+        if let Some(&cached) = availability.get(command) {
+            return cached;
+        }
+        let available = which::which(command).is_ok();
+        availability.insert(command.to_string(), available);
+        available
+    }
+
+    fn render_cmds(
+        &self,
+        backend: Backend,
+        input_path: &Path,
+        output_path: &Path,
+    ) -> Vec<RenderCommand> {
         let input_str = input_path.to_string_lossy().to_string();
         let output_str = output_path.to_string_lossy().to_string();
         match backend {
             Backend::LaTeX => {
                 let output_dir = input_path.parent().unwrap_or_else(|| Path::new("."));
                 let output_dir_str = output_dir.to_string_lossy().to_string();
-                let dvi_str = input_path.with_extension("dvi").to_string_lossy().to_string();
+                let dvi_str = input_path
+                    .with_extension("dvi")
+                    .to_string_lossy()
+                    .to_string();
                 vec![
                     RenderCommand {
                         program: self.config.latex_cmd.clone(),
@@ -139,6 +175,8 @@ impl RenderContext {
                         program: self.config.latex_svg_cmd.clone(),
                         args: vec![
                             "--bbox=min".into(),
+                            "--exact-bbox".into(),
+                            "--no-fonts".into(),
                             "-o".into(),
                             output_str,
                             dvi_str,
@@ -216,7 +254,11 @@ impl RenderContext {
         Ok(())
     }
 
-    pub async fn render_one(&self, backend: Backend, fragment_content: String) -> Result<(PathBuf, process::Output), io::Error> {
+    pub async fn render_one(
+        &self,
+        backend: Backend,
+        fragment_content: String,
+    ) -> Result<(PathBuf, process::Output), io::Error> {
         let key = self.cache_key(backend, &fragment_content);
         trace!(backend = ?backend, hash = %key.hash, "render request");
         let paths = self.cached_paths(backend, &key.hash);
@@ -248,7 +290,10 @@ impl RenderContext {
             }
             Ok((paths.output_path, output))
         } else {
-            Err(io::Error::new(io::ErrorKind::Other, "missing render commands"))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "missing render commands",
+            ))
         }
     }
 
@@ -321,10 +366,7 @@ mod tests {
     #[ignore = "requires latex and dvisvgm binaries"]
     fn render_latex_batch() {
         let ctx = RenderContext::new();
-        let fragments = vec![
-            "$E=mc^2$".into(),
-            "$a^2+b^2=c^2$".into(),
-        ];
+        let fragments = vec!["$E=mc^2$".into(), "$a^2+b^2=c^2$".into()];
 
         let results = smol::block_on(
             ctx.render_batch(Backend::LaTeX, fragments)

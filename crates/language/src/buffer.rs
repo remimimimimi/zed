@@ -45,7 +45,7 @@ use std::{
     borrow::Cow,
     cell::Cell,
     cmp::{self, Ordering, Reverse},
-    collections::{hash_map, BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     iter::{self, Iterator, Peekable},
     mem,
@@ -4754,22 +4754,10 @@ impl BufferSnapshot {
             .map(|grammar| grammar.math_preview_config.as_ref())
             .collect::<Vec<_>>();
         let text = &self.text;
-        let mut fragments_by_key: HashMap<(Range<usize>, u8), MathFragment> = HashMap::default();
-        let mut order = Vec::new();
-
-        fn kind_key(kind: MathPreviewKind) -> u8 {
-            match kind {
-                MathPreviewKind::Inline => 0,
-                MathPreviewKind::Block => 1,
-            }
-        }
-
-        fn backend_priority(backend: MathPreviewBackend) -> u8 {
-            match backend {
-                MathPreviewBackend::Latex => 1,
-                MathPreviewBackend::Typst => 0,
-            }
-        }
+        let mut fragments_by_key: HashMap<
+            (Range<usize>, MathPreviewKind, MathPreviewBackend),
+            MathFragment,
+        > = HashMap::default();
 
         while let Some(mat) = syntax_matches.peek() {
             let Some(config) = configs[mat.grammar_index].as_ref() else {
@@ -4797,36 +4785,36 @@ impl BufferSnapshot {
                     kind: preview_capture.kind,
                     backend: preview_capture.backend,
                 };
-                let key = (range, kind_key(fragment.kind));
-                match fragments_by_key.entry(key.clone()) {
-                    hash_map::Entry::Vacant(entry) => {
-                        entry.insert(fragment);
-                        order.push(key);
-                    }
-                    hash_map::Entry::Occupied(mut entry) => {
-                        if backend_priority(fragment.backend)
-                            > backend_priority(entry.get().backend)
-                        {
-                            entry.insert(fragment);
-                        }
-                    }
-                }
+                fragments_by_key
+                    .entry((range, fragment.kind, fragment.backend))
+                    .or_insert(fragment);
             }
 
             syntax_matches.advance();
         }
 
-        let mut fragments = Vec::with_capacity(order.len());
-        for key in order {
-            if let Some(fragment) = fragments_by_key.remove(&key) {
-                fragments.push(fragment);
+        fn kind_order(kind: MathPreviewKind) -> u8 {
+            match kind {
+                MathPreviewKind::Inline => 0,
+                MathPreviewKind::Block => 1,
             }
         }
+
+        fn backend_order(backend: MathPreviewBackend) -> u8 {
+            match backend {
+                MathPreviewBackend::Latex => 0,
+                MathPreviewBackend::Typst => 1,
+            }
+        }
+
+        let mut fragments = fragments_by_key.into_values().collect::<Vec<_>>();
         fragments.sort_by(|a, b| {
             a.range
                 .start
                 .cmp(&b.range.start)
                 .then(a.range.end.cmp(&b.range.end))
+                .then(kind_order(a.kind).cmp(&kind_order(b.kind)))
+                .then(backend_order(a.backend).cmp(&backend_order(b.backend)))
         });
         fragments.into_iter()
     }
@@ -4844,8 +4832,7 @@ impl BufferSnapshot {
             if predicate.operator.as_ref() != "make-range!" {
                 continue;
             }
-            let Some((target, start, end)) =
-                Self::parse_math_preview_make_range(&predicate.args)
+            let Some((target, start, end)) = Self::parse_math_preview_make_range(&predicate.args)
             else {
                 continue;
             };

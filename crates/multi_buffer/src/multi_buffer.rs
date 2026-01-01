@@ -5758,8 +5758,13 @@ impl MultiBufferSnapshot {
     pub fn math_fragments<T: ToOffset>(
         &self,
         range: Range<T>,
-    ) -> impl Iterator<Item = (Range<MultiBufferOffset>, language::MathFragment, &BufferSnapshot)> + '_
-    {
+    ) -> impl Iterator<
+        Item = (
+            Range<MultiBufferOffset>,
+            language::MathFragment,
+            &BufferSnapshot,
+        ),
+    > + '_ {
         let range = range.start.to_offset(self)..range.end.to_offset(self);
         self.lift_buffer_metadata(range, move |buffer, range| {
             Some(
